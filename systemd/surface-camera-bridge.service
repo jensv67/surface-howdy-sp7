@@ -1,0 +1,13 @@
+[Unit]
+Description=Surface Pro 7 camera bridge (libcamera -> v4l2loopback)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/surface-camera-bridge-run
+Restart=always
+RestartSec=2
+Nice=5
+
+[Install]
+WantedBy=default.target

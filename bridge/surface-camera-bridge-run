@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+MD=/dev/media0
+RES=640x480
+FMT=Y10_1X10
+
+G=$(media-ctl -d "$MD" -p)
+SENSOR=$(printf '%s\n' "$G" | awk '$0 ~ "- entity .*: ov7251" { name=$0; sub(/.*: /,"",name); sub(/ \(.*/,"",name); print name; exit }')
+PORT=$(printf '%s\n' "$G" | awk '$0 ~ "- entity .*: ov7251" { hit=1 } hit && /-> "Intel IPU4 CSI-2 [0-9]+":0/ { match($0,/CSI-2 [0-9]+/); print substr($0,RSTART+6,RLENGTH-6); exit }')
+CAP=$(media-ctl -d "$MD" -e "Intel IPU4 BE SOC capture 0")
+[ -n "$SENSOR" ] && [ -n "$PORT" ] && [ -n "$CAP" ] || exit 1
+
+media-ctl -d "$MD" -r
+media-ctl -d "$MD" -V "\"$SENSOR\":0 [fmt:$FMT/$RES]"
+media-ctl -d "$MD" -V "\"Intel IPU4 CSI-2 $PORT\":0 [fmt:$FMT/$RES]"
+media-ctl -d "$MD" -V "\"Intel IPU4 CSI-2 $PORT\":1 [fmt:$FMT/$RES]"
+media-ctl -d "$MD" -l "\"$SENSOR\":0 -> \"Intel IPU4 CSI-2 $PORT\":0 [1]"
+media-ctl -d "$MD" -l "\"Intel IPU4 CSI-2 $PORT\":1 -> \"Intel IPU4 CSI2 BE SOC\":0 [5]"
+media-ctl -d "$MD" -l "\"Intel IPU4 CSI2 BE SOC\":8 -> \"Intel IPU4 BE SOC capture 0\":0 [5]"
+media-ctl -d "$MD" -V "\"Intel IPU4 CSI2 BE SOC\":0 [fmt:$FMT/$RES]"
+media-ctl -d "$MD" -V "\"Intel IPU4 CSI2 BE SOC\":8 [fmt:$FMT/$RES]"
+
+exec python3 "$HOME/.local/bin/surface-ir-bridge.py" "$CAP"

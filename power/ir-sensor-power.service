@@ -1,0 +1,13 @@
+[Unit]
+Description=Surface IR sensor power watcher (stop camera bridge when idle)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/ir-sensor-power.py
+Environment=IDLE_STOP_SECONDS=180
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
