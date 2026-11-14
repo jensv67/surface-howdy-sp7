@@ -130,6 +130,17 @@ systemctl --user enable --now ir-sensor-power.service
 
 `IDLE_STOP_SECONDS` (default 180) configures the idle timeout.
 
+### 8. Kernel updates — the install-line trap
+
+If you use a modprobe `install` line for the IR strobe parameter (as this SP7 setup does, so `experimental_strobe_output=1` is passed to the IR LED), do **not** hardcode the kernel version in the module path. After a kernel update the stale path makes `insmod` fail with ENOENT, the ov7251 never binds, and the bridge crash-loops into systemd's `start-limit-hit` — while ov5693/ov8865 (which load normally via depmod) keep working, which makes it look like a random failure. Version-safe form:
+
+```ini
+# /etc/modprobe.d/surfacepro7-camera-ir.conf
+install ov7251 /usr/sbin/insmod /usr/lib/modules/$(uname -r)/extra/surfacepro7-camera-ir/ov7251.ko experimental_strobe_output=1
+```
+
+modprobe runs install commands through the shell, so `$(uname -r)` expands on every call and the line survives every kernel update. Recovery if you already hit the start limit: `systemctl --user reset-failed surface-camera-bridge.service` before restarting the unit.
+
 ## Gotchas (these cost me days — save yours)
 
 1. **Y10 is supported by almost nothing in userspace** (GStreamer, ffmpeg, OpenCV V4L2 backend) — hence the custom bridge; the loopback is GRAY8.
