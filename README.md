@@ -4,7 +4,7 @@ Howdy IR face authentication for the **Surface Pro 7 (Intel Ice Lake, IPU4P, 808
 
 Inspired by the Surface Pro 5 PoC (IPU3/OV7251) in [linux-surface issue #2197](https://github.com/linux-surface/linux-surface/issues/2197) and [lksmasin/surface-howdy-sp5](https://github.com/lksmasin/surface-howdy-sp5). Differences vs. that approach: IPU4 instead of IPU3, out-of-tree `ipu7-drivers` patched for the SP7, and a persistent Python bridge as a systemd user service instead of a C bridge spawned on demand.
 
-Tested on: Arch Linux, linux-surface kernel 7.2.x, Plasma 6 / KDE (Wayland).
+Tested on: Arch Linux, linux-surface kernel 7.2.x/7.3.x, Plasma 6 / KDE (Wayland).
 
 ## Pipeline
 
@@ -13,7 +13,8 @@ ov7251 IR sensor (Y10, 640x480, mounted 90° portrait)
   → IPU4 media pipeline (media-ctl: sensor → CSI-2 → BE SOC capture 0)
   → /dev/video42 (raw Y10 in a 16-bit container)
   → v4l2-ctl --stream-mmap=4 --stream-to=stdout
-  → Python bridge (numpy: 10→8-bit gain, rotate 90° CCW)
+  → Python bridge (numpy: 10→8-bit gain, rotate 90° CCW) → stdout
+  → ffmpeg (proper V4L2 output handshake: REQBUFS + STREAMON)
   → v4l2loopback /dev/video60 (GRAY8 480x640, ~30 fps)
   → Howdy (device_path=/dev/video60) → PAM (sudo, kscreenlocker, polkit)
 ```
@@ -21,15 +22,15 @@ ov7251 IR sensor (Y10, 640x480, mounted 90° portrait)
 ## Requirements
 
 - Arch Linux (or adapt package names) with linux-surface kernel + headers
-- `base-devel`, `v4l-utils`, `python-numpy`, `v4l2loopback` (dkms or prebuilt modules)
+- `base-devel`, `v4l-utils`, `python-numpy`, `ffmpeg`, `v4l2loopback` (dkms or prebuilt modules)
 - AUR: `howdy` (v2 layout), `pam-python-git` (py3 fork, installs as `pam_python3.so`)
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `bridge/surface-camera-bridge-run` | Runner: configures the IPU4 media pipeline, execs the converter |
-| `bridge/surface-ir-bridge.py` | Y10→GRAY8 converter (numpy gain + 90° rotation), writes to the loopback |
+| `bridge/surface-camera-bridge-run` | Runner: configures the IPU4 media pipeline, pipes the converter into ffmpeg |
+| `bridge/surface-ir-bridge.py` | Y10→GRAY8 converter (numpy gain + 90° rotation), writes GRAY8 frames to stdout |
 | `systemd/surface-camera-bridge.service` | systemd **user** unit for the bridge |
 | `howdy/pam.py` | Hardened Howdy PAM glue (timeout, clean fallback, robust conversation) |
 | `power/ir-sensor-power.py` + `.service` | Optional: input-driven watchdog, puts the IR sensor into runtime-PM standby when idle |
@@ -58,7 +59,7 @@ Options matter: kernel modules must not be stripped or LTO'd (`!strip !debug !lt
 options v4l2loopback video_nr=60 card_label="Surface Pro 7 IR Bridge" exclusive_caps=1
 ```
 
-`exclusive_caps=1` makes the loopback advertise capture-only caps — required for GStreamer/OpenCV to accept it as a camera.
+`exclusive_caps=1` makes the loopback advertise capture-only caps while the writer streams — required for GStreamer/OpenCV to accept it as a camera. Note: since v4l2loopback 0.15.x this is the default behavior anyway, and the caps only flip while the output side does a proper REQBUFS+STREAMON (see gotcha 6).
 
 ### 3. The bridge
 
@@ -67,6 +68,8 @@ install -m 755 bridge/surface-camera-bridge-run bridge/surface-ir-bridge.py ~/.l
 ```
 
 `IR_GAIN` (default 2) controls brightness — the IR sensor delivers 10-bit values around 11–160, so the gain matters for Howdy's `dark_threshold`. `IR_ROT` (default 1 = 90° CCW) fixes the portrait mounting.
+
+The runner pipes the processed GRAY8 frames into `ffmpeg`, which writes them to the loopback with a full V4L2 output handshake (REQBUFS + STREAMON). That handshake is what makes v4l2loopback ≥ 0.15 advertise capture caps — a plain `write()` stopped being enough in 0.15.
 
 ### 4. systemd user service
 
@@ -117,7 +120,7 @@ With that in place the password fallback works even with the camera dead — tes
 
 ### 7. Optional: IR sensor power management
 
-The bridge costs ~20% of a core while streaming. A small watchdog (user service) stops the bridge after 3 min without input — the sensor drops into runtime-PM standby (`/sys/class/video4linux/video42/device/power/runtime_status` → `suspended`) — and restarts it on the first keypress. Face unlock after wake still works; if Howdy loses the ~1–2 s warmup race, press Enter on the empty password prompt to re-trigger the scan.
+The bridge costs ~20% of a core while streaming. A small watchdog (user service) stops the bridge after 3 min without input — the sensor drops into runtime-PM standby (`/sys/class/video4linux/video42/device/power/runtime_status` → `suspended`) — and restarts it on the first keypress. Face unlock after idle still works; if Howdy loses the ~1–2 s warmup race, press Enter on the empty password prompt to re-trigger the scan.
 
 ```bash
 # Wayland: the session user has no read access to /dev/input/event* by default
@@ -148,6 +151,7 @@ modprobe runs install commands through the shell, so `$(uname -r)` expands on ev
 3. **Wedge behavior:** after a failed STREAMON the ISYS is poisoned (EBUSY); only a reboot clears it quickly. A wedged-but-running bridge looks healthy in systemd — the journal fps counter is your truth.
 4. **Don't hardcode v4l2 ioctl structs** — struct sizes vary across kernels (ENOTTY); let `v4l2-ctl` set formats.
 5. Frequent stop/start cycles (power management) hit the wedge occasionally — the `Restart=always` unit recovers automatically.
+6. **v4l2loopback 0.15.x changed its caps semantics:** `exclusive_caps` is the default now, and capture caps are only advertised while the output side does a proper REQBUFS+STREAMON — a raw `write()` no longer flips them. Consumers (Howdy/GStreamer) then abort instantly with "Not a video capture device" instead of blocking until frames arrive, and a raw-writing bridge silently wedges in `write()`. Hence the ffmpeg output stage in this repo. Check with `v4l2-ctl -d /dev/video60 --all`: it must show `Video Capture` while the bridge runs.
 
 ## Credits
 
