@@ -20,4 +20,12 @@ media-ctl -d "$MD" -l "\"Intel IPU4 CSI2 BE SOC\":8 -> \"Intel IPU4 BE SOC captu
 media-ctl -d "$MD" -V "\"Intel IPU4 CSI2 BE SOC\":0 [fmt:$FMT/$RES]"
 media-ctl -d "$MD" -V "\"Intel IPU4 CSI2 BE SOC\":8 [fmt:$FMT/$RES]"
 
-exec python3 "$HOME/.local/bin/surface-ir-bridge.py" "$CAP"
+# Output geometry after rotation (IR_ROT=1 -> 90 degrees -> portrait 480x640)
+ROT=${IR_ROT:-1}
+if [ $((ROT % 2)) -eq 1 ]; then OW=480; OH=640; else OW=640; OH=480; fi
+
+python3 "$HOME/.local/bin/surface-ir-bridge.py" "$CAP" | \
+ffmpeg -hide_banner -loglevel error \
+    -f rawvideo -pix_fmt gray -video_size "${OW}x${OH}" -framerate 30 \
+    -i pipe:0 \
+    -f v4l2 -pix_fmt gray -video_size "${OW}x${OH}" /dev/video60
